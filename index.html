@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0a1f40">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="msapplication-TileColor" content="#0a1f40">
+    <meta name="msapplication-TileImage" content="https://cdn-icons-png.flaticon.com/512/2591/2591942.png">
+    <meta name="mobile-web-app-capable" content="yes">
+    <title>MÖLKKY - Finnish Outdoor Game</title>
+    
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="./manifest.json">
+    <link rel="icon" type="image/png" href="https://cdn-icons-png.flaticon.com/512/2591/2591942.png">
+    <link rel="apple-touch-icon" href="https://cdn-icons-png.flaticon.com/512/2591/2591942.png">
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&display=swap');
+        body { 
+            font-family: 'Inter', sans-serif; 
+            -webkit-tap-highlight-color: transparent;
+            margin: 0;
+            padding: 0;
+            position: fixed;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background: #0a1f40;
+            /* Status bar adjustments for notch */
+            padding-top: max(0px, env(safe-area-inset-top));
+            padding-left: env(safe-area-inset-left);
+            padding-right: env(safe-area-inset-right);
+            padding-bottom: env(safe-area-inset-bottom);
+        }
+        .animate-in { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+        .touch-none { touch-action: manipulation; }
+        input[type="text"] { -webkit-appearance: none; }
+        
+        #app {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* PWA Install Prompt Styling */
+        #pwa-install-prompt {
+            display: none;
+            position: fixed;
+            bottom: 24px;
+            left: 24px;
+            right: 24px;
+            background: white;
+            padding: 16px;
+            border-radius: 16px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+            z-index: 9999;
+            align-items: center;
+            justify-content: space-between;
+            border: 1px solid #e2e8f0;
+        }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 m-0 p-0">
+    <div id="app" class="min-h-screen w-full flex flex-col select-none overflow-hidden touch-manipulation" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; display: flex; flex-direction: column;"></div>
+
+    <!-- PWA Installation Banner -->
+    <div id="pwa-install-prompt">
+        <div class="flex items-center gap-3">
+            <div class="bg-blue-600 p-2 rounded-lg text-white">
+                <i data-lucide="download"></i>
+            </div>
+            <div>
+                <p class="font-bold text-sm">Install Mölkky</p>
+                <p class="text-xs text-slate-500">Play offline on the field</p>
+            </div>
+        </div>
+        <button id="pwa-install-btn" class="bg-blue-600 text-white px-4 py-2 rounded-xl font-bold text-sm active:scale-95">Install</button>
+    </div>
+
+    <script>
+        // --- PWA SERVICE WORKER REGISTRATION ---
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./service-worker.js', { scope: '/' })
+                    .then((registration) => {
+                        console.log('[PWA] Service Worker registered:', registration);
+                        
+                        // Check for updates periodically
+                        setInterval(() => {
+                            registration.update();
+                        }, 60000);
+                    })
+                    .catch((error) => {
+                        console.log('[PWA] Service Worker registration failed:', error);
+                    });
+            });
+
+            // Handle service worker updates
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                console.log('[PWA] Service Worker updated');
+            });
+        }
+
+        // --- PWA INSTALL PROMPT ---
+
+        let deferredPrompt;
+        window.addEventListener('beforeinstallprompt', (e) => {
+            e.preventDefault();
+            deferredPrompt = e;
+            document.getElementById('pwa-install-prompt').style.display = 'flex';
+            lucide.createIcons();
+        });
+
+        document.getElementById('pwa-install-btn').addEventListener('click', async () => {
+            if (deferredPrompt) {
+                deferredPrompt.prompt();
+                const { outcome } = await deferredPrompt.userChoice;
+                if (outcome === 'accepted') {
+                    console.log('[PWA] App installed');
+                }
+                document.getElementById('pwa-install-prompt').style.display = 'none';
+                deferredPrompt = null;
+            }
+        });
+
+        // Hide install prompt if already installed or dismissed
+        window.addEventListener('appinstalled', () => {
+            document.getElementById('pwa-install-prompt').style.display = 'none';
+            console.log('[PWA] App successfully installed');
+        });
+
+        // --- ORIGINAL APP STATE ---
+        let state = {
+            view: 'home',
+            mode: null,
+            count: 0,
+            entities: [],
+            gameData: {
+                round: 1,
+                turnIndex: 0,
+                history: [],
+                roundWins: {},
+            },
+            modal: null,
+            lastAction: null,
+            showCelebration: false
+        };
+
+        // --- ORIGINAL AUDIO LOGIC ---
+        let audioCtx = null;
+        function getAudioContext() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            return audioCtx;
+        }
+
+        function playPing() {
+            const ctx = getAudioContext();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, ctx.currentTime);
+            osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
+            gain.gain.setValueAtTime(0.1, ctx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.1);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.1);
+        }
+
+        function playCelebrationSound() {
+            const ctx = getAudioContext();
+            const now = ctx.currentTime;
+            const playNote = (freq, start, duration) => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(freq, start);
+                gain.gain.setValueAtTime(0, start);
+                gain.gain.linearRampToValueAtTime(0.1, start + 0.05);
+                gain.gain.exponentialRampToValueAtTime(0.01, start + duration);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(start);
+                osc.stop(start + duration);
+            };
+            playNote(523.25, now, 0.2); 
+            playNote(659.25, now + 0.1, 0.2); 
+            playNote(783.99, now + 0.2, 0.4); 
+        }
+
+        // --- ORIGINAL CORE LOGIC ---
+        function setView(viewName) {
+            state.view = viewName;
+            render();
+        }
+
+        function initEntities(m, c) {
+            state.mode = m;
+            state.count = c;
+            state.entities = [];
+            for (let i = 0; i < c; i++) {
+                state.entities.push({
+                    id: i,
+                    name: m === 'players' ? `Player ${i + 1}` : `Team ${i + 1}`,
+                    score: 0,
+                    missCount: 0,
+                    history: [],
+                    eliminated: false,
+                    starter: i === 0
+                });
+            }
+            const wins = {};
+            state.entities.forEach(e => wins[e.id] = 0);
+            state.gameData = {
+                round: 1,
+                turnIndex: 0,
+                history: [],
+                roundWins: wins
+            };
+            setView('names');
+        }
+
+        function handleScore(value) {
+            if (state.modal) return; 
+            playPing();
+            state.lastAction = value;
+            render();
+            
+            setTimeout(() => { 
+                state.lastAction = null; 
+                if (!state.modal) render(); 
+            }, 500);
+
+            const currentIdx = state.gameData.turnIndex;
+            const player = state.entities[currentIdx];
+
+            const prevState = {
+                entities: JSON.parse(JSON.stringify(state.entities)),
+                gameData: { ...state.gameData, roundWins: { ...state.gameData.roundWins } }
+            };
+            state.gameData.history.push(prevState);
+
+            if (value === 0) {
+                player.missCount += 1;
+            } else {
+                player.missCount = 0;
+                player.score += value;
+            }
+
+            player.history.unshift(value);
+
+            if (player.score > 50) {
+                player.score = 25;
+                state.modal = 'bust';
+                render();
+                return;
+            }
+
+            if (player.score === 50) {
+                tallyWin(currentIdx);
+                state.modal = 'winner';
+                render();
+                return;
+            }
+
+            if (player.missCount >= 3) {
+                player.eliminated = true;
+                const activeOnes = state.entities.filter(e => !e.eliminated);
+                if (activeOnes.length === 1 && state.entities.length > 1) {
+                    const winnerIdx = state.entities.findIndex(e => !e.eliminated);
+                    tallyWin(winnerIdx);
+                    state.modal = 'winner';
+                    render();
+                    return;
+                }
+                if (activeOnes.length === 0 || state.entities.length === 1) {
+                    state.modal = 'loser';
+                    render();
+                    return;
+                }
+            }
+
+            nextTurn();
+            render();
+        }
+
+        function tallyWin(winnerIdx) {
+            const winnerId = state.entities[winnerIdx].id;
+            state.gameData.roundWins[winnerId] = (state.gameData.roundWins[winnerId] || 0) + 1;
+            state.gameData.turnIndex = winnerIdx;
+        }
+
+        function nextTurn() {
+            let nextIdx = (state.gameData.turnIndex + 1) % state.entities.length;
+            let safety = 0;
+            while (state.entities[nextIdx].eliminated && safety < state.entities.length) {
+                nextIdx = (nextIdx + 1) % state.entities.length;
+                safety++;
+            }
+            state.gameData.turnIndex = nextIdx;
+        }
+
+        function undo() {
+            if (state.gameData.history.length === 0) return;
+            playPing();
+            const lastState = state.gameData.history.pop();
+            state.entities = lastState.entities;
+            state.gameData = lastState.gameData;
+            state.modal = null;
+            render();
+        }
+
+        function changeStarter(idx) {
+            const roundHasStarted = state.entities.some(e => e.history.length > 0);
+            if (roundHasStarted) return;
+            state.entities.forEach((e, i) => e.starter = (i === idx));
+            state.gameData.turnIndex = idx;
+            playPing();
+            render();
+        }
+
+        function startNextRound() {
+            const oldStarterIdx = state.entities.findIndex(e => e.starter);
+            const newStarterIdx = (oldStarterIdx + 1) % state.entities.length;
+            state.entities.forEach((e, idx) => {
+                e.score = 0;
+                e.missCount = 0;
+                e.history = [];
+                e.eliminated = false;
+                e.starter = (idx === newStarterIdx);
+            });
+            state.gameData.round++;
+            state.gameData.turnIndex = newStarterIdx;
+            state.gameData.history = [];
+            state.modal = null;
+            render();
+        }
+
+        function restartRound() {
+            state.entities.forEach(e => {
+                e.score = 0;
+                e.missCount = 0;
+                e.history = [];
+                e.eliminated = false;
+            });
+            state.gameData.turnIndex = state.entities.findIndex(e => e.starter);
+            state.gameData.history = [];
+            state.modal = null;
+            render();
+        }
+
+        // --- ORIGINAL TEMPLATES ---
+        function FinnishLandscapeSVG() {
+            return `<svg viewBox="0 0 400 300" class="w-full max-w-sm mb-8 drop-shadow-2xl"><defs><linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%"><stop offset="0%" style="stop-color: #1e3a8a; stop-opacity: 1" /><stop offset="100%" style="stop-color: #3b82f6; stop-opacity: 1" /></linearGradient></defs><rect width="400" height="200" fill="url(#skyGrad)" /><path d="M0 200 L80 120 L160 180 L240 100 L320 190 L400 130 V200 H0 Z" fill="#1e293b" opacity="0.5" /><rect y="200" width="400" height="100" fill="#0c4a6e" /><path d="M0 200 Q100 210 200 200 T400 200 V210 H0 Z" fill="#0ea5e9" opacity="0.3" /><g transform="translate(40, 190) scale(0.8)"><rect x="-5" y="0" width="10" height="20" fill="#451a03" /><path d="M0 -60 L30 -20 L-30 -20 Z" fill="#064e3b" /><path d="M0 -45 L25 -10 L-25 -10 Z" fill="#065f46" /></g><g transform="translate(70, 205) scale(1.1)"><rect x="-5" y="0" width="10" height="20" fill="#451a03" /><path d="M0 -60 L30 -20 L-30 -20 Z" fill="#064e3b" /><path d="M0 -45 L25 -10 L-25 -10 Z" fill="#065f46" /></g><g transform="translate(280, 210)"><path d="M-40 0 L0 -50 L40 0 Z" fill="#b91c1c" /><path d="M-40 0 L-10 -50 L20 0 Z" fill="#991b1b" /><path d="M-5 -25 L0 0 L5 -25 Z" fill="#450a0a" /></g><line x1="150" y1="240" x2="250" y2="240" stroke="white" stroke-width="1" stroke-dasharray="10,5" opacity="0.4" class="animate-pulse" /><g transform="translate(350, 195)"><rect x="-5" y="0" width="10" height="20" fill="#451a03" /><path d="M0 -60 L30 -20 L-30 -20 Z" fill="#064e3b" /><path d="M0 -45 L25 -10 L-25 -10 Z" fill="#065f46" /></g></svg>`;
+        }
+
+        function PinLayoutSVG() {
+            return `<div class="rounded-xl overflow-hidden border-2 border-blue-100 w-full flex justify-center bg-white p-2"><svg width="200" height="250" viewBox="0 0 400 500" class="max-w-full h-auto"><rect width="100%" height="100%" fill="white" /><g transform="translate(200, 250)"><style>.circle { fill: white; stroke: #f3b03d; stroke-width: 3; } .svg-text { font-family: Arial, sans-serif; font-weight: bold; font-size: 48px; text-anchor: middle; dominant-baseline: central; fill: black; }</style><g transform="translate(-85, -145)"><circle r="42" class="circle" /><text class="svg-text">7</text></g><g transform="translate(0, -145)"><circle r="42" class="circle" /><text class="svg-text">9</text></g><g transform="translate(85, -145)"><circle r="42" class="circle" /><text class="svg-text">8</text></g><g transform="translate(-128, -72)"><circle r="42" class="circle" /><text class="svg-text">5</text></g><g transform="translate(-43, -72)"><circle r="42" class="circle" /><text class="svg-text">11</text></g><g transform="translate(43, -72)"><circle r="42" class="circle" /><text class="svg-text">12</text></g><g transform="translate(128, -72)"><circle r="42" class="circle" /><text class="svg-text">6</text></g><g transform="translate(-85, 0)"><circle r="42" class="circle" /><text class="svg-text">3</text></g><g transform="translate(0, 0)"><circle r="42" class="circle" /><text class="svg-text">10</text></g><g transform="translate(85, 0)"><circle r="42" class="circle" /><text class="svg-text">4</text></g><g transform="translate(-43, 72)"><circle r="42" class="circle" /><text class="svg-text">1</text></g><g transform="translate(43, 72)"><circle r="42" class="circle" /><text class="svg-text">2</text></g></g></svg></div>`;
+        }
+
+        function Modal(title, content) {
+            return `<div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"><div class="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-in"><div class="bg-blue-900 p-4 text-white text-center font-bold text-xl">${title}</div><div class="p-6 flex flex-col gap-4 items-center text-center">${content}</div></div></div>`;
+        }
+
+        // --- ORIGINAL RENDER ENGINE ---
+        function render() {
+            const app = document.getElementById('app');
+            let html = '';
+
+            if (state.view === 'home') {
+                html = `<div class="flex-1 flex flex-col items-center justify-center p-6 text-white text-center bg-[#0a1f40]"><div class="mb-6"><h1 class="text-6xl font-black tracking-tighter mb-2 italic">MÖLKKY</h1><p class="text-blue-300 font-bold tracking-[0.3em] uppercase text-sm">Finnish Outdoor Game</p></div>${FinnishLandscapeSVG()}<button onclick="setView('config')" class="group flex items-center gap-3 bg-blue-600 hover:bg-blue-500 transition-all px-10 py-6 rounded-full text-2xl font-bold shadow-xl active:scale-95 border-b-4 border-blue-800"><i data-lucide="users"></i> PLAY GAME</button><p class="mt-6 text-blue-400/60 text-xs font-bold uppercase tracking-widest">Est. in Lahti, Finland</p></div>`;
+            } else if (state.view === 'config') {
+                html = `<div class="flex-1 bg-blue-50 flex flex-col p-6 items-center"><button onclick="setView('home')" class="self-start p-2 text-blue-900 mb-8"><i data-lucide="chevron-left" class="w-8 h-8"></i></button><h2 class="text-3xl font-bold text-blue-900 mb-12">Setup Game</h2><div class="w-full space-y-12"><section><h3 class="text-center font-bold text-blue-700/60 uppercase tracking-widest mb-4">Individual Players</h3><div class="flex justify-center gap-4">${[1,2,3,4].map(n => `<button onclick="initEntities('players', ${n})" class="w-16 h-16 bg-white border-4 border-blue-200 rounded-2xl flex flex-col items-center justify-center shadow-lg text-blue-900 active:bg-blue-100"><i data-lucide="user" class="w-5 h-5"></i><span class="font-bold text-lg">${n}</span></button>`).join('')}</div></section><section><h3 class="text-center font-bold text-blue-700/60 uppercase tracking-widest mb-4">Teams</h3><div class="flex justify-center gap-4">${[2,3,4].map(n => `<button onclick="initEntities('teams', ${n})" class="w-16 h-16 bg-white border-4 border-blue-900 rounded-2xl flex flex-col items-center justify-center shadow-lg text-blue-900 active:bg-blue-100"><i data-lucide="users" class="w-6 h-6"></i><span class="font-bold text-lg">${n}</span></button>`).join('')}</div></section></div></div>`;
+            } else if (state.view === 'names') {
+                html = `<div class="flex-1 bg-white flex flex-col p-6 items-center"><button onclick="setView('config')" class="self-start p-2 text-blue-900 mb-8"><i data-lucide="chevron-left" class="w-8 h-8"></i></button><h2 class="text-3xl font-bold text-blue-900 mb-8 text-center">Name Your ${state.mode === 'players' ? 'Players' : 'Teams'}</h2><div class="w-full max-sm:px-4 space-y-4 max-w-md">${state.entities.map((ent, idx) => `<div class="flex flex-col gap-1"><label class="text-xs font-bold text-blue-500 uppercase ml-2">${state.mode === 'players' ? 'Player' : 'Team'} ${idx + 1}</label><input type="text" maxLength="20" value="${ent.name}" oninput="state.entities[${idx}].name = this.value" class="w-full p-4 bg-blue-50 border-2 border-blue-100 rounded-xl font-bold text-xl text-blue-900 outline-none focus:border-blue-500" /></div>`).join('')}</div><button onclick="setView('game')" class="mt-12 bg-blue-900 text-white w-full max-w-sm py-5 rounded-2xl text-2xl font-bold shadow-xl active:scale-95">Start Game</button></div>`;
+            } else if (state.view === 'game') {
+                const roundHasStarted = state.entities.some(e => e.history.length > 0);
+                html = `<div class="flex-1 flex flex-col relative overflow-hidden bg-slate-50">${state.showCelebration ? `<div class="fixed inset-0 z-[100] flex flex-col items-center justify-center bg-blue-900/90 text-white animate-in"><div class="w-32 h-32 mb-6 animate-bounce"><svg viewBox="0 0 18 11" class="w-full h-full rounded shadow-2xl"><rect width="18" height="11" fill="white" /><rect width="18" height="3" y="4" fill="#003580" /><rect width="3" height="11" x="5" fill="#003580" /></svg></div><h2 class="text-6xl font-black italic tracking-widest animate-pulse">SISU!</h2><p class="text-xl font-bold mt-4 opacity-80">Round Complete</p></div>` : ''}<div class="p-4 flex items-center justify-between z-10 gap-2"><button onclick="state.modal = 'menu'; render();" class="bg-white px-2 py-1.5 rounded-lg border border-blue-200 shadow-sm font-bold flex items-center justify-center gap-1.5 w-[75px] h-[32px]"><i data-lucide="settings" class="w-3.5 h-3.5"></i> <span class="text-[11px] font-bold">Setup</span></button><div class="bg-blue-900 text-white px-4 py-1.5 rounded-full font-black shadow-lg text-sm flex-1 text-center max-w-[140px] uppercase tracking-wider">Round ${state.gameData.round}</div><button onclick="state.modal = 'restart'; render();" class="bg-white px-2 py-1.5 rounded-lg border border-blue-200 shadow-sm font-bold flex items-center justify-center gap-1.5 w-[75px] h-[32px]"><i data-lucide="rotate-ccw" class="w-3.5 h-3.5"></i> <span class="text-[11px] font-bold">Reset</span></button></div><div class="flex justify-center px-4 mt-2"><div class="grid gap-2 w-full max-w-lg" style="grid-template-columns: repeat(${state.entities.length}, minmax(0, 1fr))">${state.entities.map((ent, idx) => `<div class="flex flex-col items-center transition-all duration-300 relative ${ent.eliminated ? 'opacity-30' : 'opacity-100'}">${state.gameData.turnIndex === idx && !ent.eliminated ? '<div class="absolute -top-3 left-1/2 -translate-x-1/2 w-8 h-1 bg-blue-600 rounded-full animate-pulse"></div>' : ''}<div onclick="changeStarter(${idx})" class="w-full flex flex-col items-center py-2 rounded-xl transition-colors ${state.gameData.turnIndex === idx && !ent.eliminated ? 'bg-blue-600 text-white shadow-md' : 'bg-white/50 text-blue-900'} ${!roundHasStarted ? 'cursor-pointer active:scale-95 border-2 border-blue-100' : 'border-2 border-transparent'}"><div class="w-full px-1 text-center"><div class="text-[9px] font-black uppercase truncate leading-tight mb-1">${ent.name}</div><div class="text-3xl font-black tabular-nums leading-none">${ent.score}</div></div></div><div class="mt-3 flex flex-col gap-1 w-full items-center">${[0,1,2].map(hIdx => `<div class="w-full max-w-[40px] h-6 flex items-center justify-center bg-white border border-blue-100 rounded text-[10px] font-bold text-blue-900 shadow-sm">${ent.history[hIdx] !== undefined ? ent.history[hIdx] : '-'}</div>`).join('')}</div><div class="mt-2 flex items-center justify-center h-5"><div class="bg-yellow-400 text-[10px] font-black px-2 py-0.5 rounded-full flex items-center gap-1 transition-opacity ${state.gameData.roundWins[ent.id] > 0 ? 'opacity-100' : 'opacity-0'}"><i data-lucide="trophy" class="w-2 h-2"></i> ${state.gameData.roundWins[ent.id] || 0}</div></div></div>`).join('')}</div></div>${!roundHasStarted ? `<div class="text-center text-[10px] font-bold text-blue-500/60 italic mt-4 animate-bounce uppercase tracking-widest">Tap card to change starter</div>` : ''}<div class="mt-auto p-4 bg-white/80 backdrop-blur-md border-t border-blue-100 rounded-t-3xl shadow-2xl"><div class="grid grid-cols-3 gap-3 mb-4 place-items-center max-w-md mx-auto">${[1,2,3,4,5,6,7,8,9,10,11,12].map(num => `<button onclick="handleScore(${num})" ${state.entities[state.gameData.turnIndex]?.eliminated ? 'disabled' : ''} class="relative w-14 h-14 rounded-full bg-white border-2 border-blue-100 shadow-sm flex items-center justify-center text-xl font-black text-blue-900 transition-all active:scale-90 disabled:opacity-50 ${state.lastAction === num ? 'bg-blue-600 text-white scale-110' : ''}">${num}</button>`).join('')}</div><div class="flex gap-3 h-16 max-w-md mx-auto"><button onclick="handleScore(0)" class="flex-[1.5] rounded-2xl bg-red-500 text-white font-black text-xl shadow-lg active:scale-95 ${state.lastAction === 0 ? 'ring-4 ring-red-300' : ''}">MISS</button><button onclick="undo()" class="flex-[1.5] rounded-2xl bg-slate-700 text-white font-black text-xl shadow-lg active:scale-95 flex items-center justify-center gap-2"><i data-lucide="undo-2"></i> UNDO</button></div></div></div>`;
+            }
+
+            // --- Modals ---
+            if (state.modal === 'menu') {
+                html += Modal('Setup', `<div class="w-full flex flex-col gap-4"><div class="flex flex-col gap-2"><h4 class="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-1 text-left">Pin Layout</h4>${PinLayoutSVG()}</div><div class="grid grid-cols-2 gap-3"><button onclick="state.modal=null; setView('home')" class="py-4 bg-red-500 text-white rounded-xl font-bold shadow-md">End Game</button><button onclick="state.modal=null; render()" class="py-4 bg-blue-600 text-white rounded-xl font-bold shadow-md">Continue</button></div></div>`);
+            } else if (state.modal === 'restart') {
+                html += Modal('Restart Round', `<i data-lucide="alert-triangle" class="text-yellow-500 w-12 h-12"></i><p class="text-lg font-bold text-slate-800">Are you sure you want to reset the scores for this round?</p><div class="flex w-full gap-3 mt-4"><button onclick="restartRound()" class="flex-1 py-4 bg-blue-600 text-white rounded-xl font-bold">OK</button><button onclick="state.modal=null; render()" class="flex-1 py-4 bg-slate-100 text-slate-800 rounded-xl font-bold">Cancel</button></div>`);
+            } else if (state.modal === 'bust') {
+                html += Modal('BUSTED!', `<div class="text-6xl mb-2">🔥</div><p class="text-xl font-bold text-red-600">Oh no! You went over 50!</p><p class="text-slate-600">Your score has been reset to 25.</p><button onclick="state.modal=null; render()" class="w-full py-4 bg-blue-600 text-white rounded-xl font-bold text-xl mt-4">Keep Going</button>`);
+            } else if (state.modal === 'winner') {
+                const winner = state.entities[state.gameData.turnIndex];
+                html += Modal('WINNER!!', `<i data-lucide="trophy" class="text-yellow-500 w-20 h-20 animate-bounce"></i><h3 class="text-2xl font-black text-blue-900 uppercase truncate px-4">${winner?.name} Wins!</h3><div class="flex w-full gap-3 mt-4"><button onclick="confirmWinner()" class="flex-1 py-4 bg-blue-600 text-white rounded-xl font-bold">OK</button><button onclick="undo()" class="flex-1 py-4 bg-red-100 text-red-600 rounded-xl font-bold">Undo</button></div>`);
+            } else if (state.modal === 'loser') {
+                html += Modal('YOU LOSE!', `<i data-lucide="x-circle" class="text-red-500 w-20 h-20 animate-pulse"></i><h3 class="text-2xl font-black text-red-900">Game Over</h3><p class="text-slate-600">3 misses in a row!</p><div class="flex w-full gap-3 mt-4"><button onclick="state.modal='another_round'; render()" class="flex-1 py-4 bg-blue-600 text-white rounded-xl font-bold">OK</button><button onclick="undo()" class="flex-1 py-4 bg-red-100 text-red-600 rounded-xl font-bold">Undo</button></div>`);
+            } else if (state.modal === 'another_round') {
+                html += Modal('Continue?', `<p class="text-xl font-bold text-slate-800">Ready for another round?</p><div class="flex w-full gap-3 mt-4"><button onclick="startNextRound()" class="flex-1 py-4 bg-green-600 text-white rounded-xl font-bold text-xl flex items-center justify-center gap-2"><i data-lucide="play"></i> YES</button><button onclick="state.modal='final_results'; render()" class="flex-1 py-4 bg-slate-100 text-slate-800 rounded-xl font-bold">NO</button></div>`);
+            } else if (state.modal === 'final_results') {
+                const sorted = [...state.entities].sort((a,b) => (state.gameData.roundWins[b.id] || 0) - (state.gameData.roundWins[a.id] || 0));
+                html += Modal('Game Results', `<div class="w-full space-y-3">${sorted.map(e => `<div class="flex justify-between items-center bg-blue-50 p-3 rounded-xl border border-blue-100"><span class="font-bold text-blue-900 truncate max-w-[150px]">${e.name}</span><span class="bg-blue-900 text-white px-3 py-1 rounded-full font-bold text-sm whitespace-nowrap">${state.gameData.roundWins[e.id] || 0} Wins</span></div>`).join('')}</div><button onclick="state.modal=null; setView('home')" class="w-full py-4 bg-blue-600 text-white rounded-xl font-bold mt-4">Main Menu</button>`);
+            }
+
+            app.innerHTML = html;
+            lucide.createIcons();
+        }
+
+        function confirmWinner() {
+            if (state.showCelebration) return;
+            state.modal = null;
+            state.showCelebration = true;
+            render();
+            playCelebrationSound();
+            setTimeout(() => {
+                state.showCelebration = false;
+                state.modal = 'another_round';
+                render();
+            }, 1200);
+        }
+
+        window.onload = () => {
+            render();
+        };
+    </script>
+</body>
+</html>
